@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Build/install artifacts
+*.egg-info/
+build/
+dist/
+
+# Generated analysis and clip outputs
+clips/
+clips_fr/
+example_clips/
+light_analysis*/
+light_clips*/
+
+# Do not commit generated media or JSON output files.
+*.json
+*.mp4
+*.mov
+*.avi
+*.mkv
+*.webm
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.wav
+*.mp3
+*.aac

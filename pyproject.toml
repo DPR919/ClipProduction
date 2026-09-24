@@ -1,0 +1,16 @@
+[project]
+name = "bout-splitter"
+version = "0.1.0"
+description = "Split fencing bout recordings into phrase clips."
+requires-python = ">=3.10"
+
+[project.optional-dependencies]
+video = ["av>=11", "numpy"]
+transcribe = ["faster-whisper>=1.0"]
+all = ["av>=11", "numpy", "faster-whisper>=1.0"]
+
+[project.scripts]
+bout-splitter = "bout_splitter.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
