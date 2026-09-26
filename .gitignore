@@ -18,6 +18,7 @@ clips_fr/
 example_clips/
 light_analysis*/
 light_clips*/
+runs/
 
 # Do not commit generated media or JSON output files.
 *.json

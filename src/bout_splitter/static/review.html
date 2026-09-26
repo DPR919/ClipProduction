@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Bout Splitter | Review</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">BS</span><span>Bout Splitter</span></div>
+    <nav class="tabs" aria-label="Workflow">
+      <button type="button" data-view="generate">Generate</button>
+      <button type="button" data-view="review">Review <span id="review-count"></span></button>
+      <button type="button" data-view="upload">Upload</button>
+    </nav>
+    <span id="top-status" class="top-status"></span>
+  </header>
+  <main id="app" aria-live="polite"></main>
+  <div id="toast" role="alert" class="toast" hidden></div>
+</body>
+</html>

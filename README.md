@@ -19,6 +19,20 @@ python -m pip install -e ".[all]"
 
 Use `python -m bout_splitter` for commands. If your Python Scripts directory is on `PATH`, `bout-splitter` also works.
 
+## Local Review And Upload
+
+Start the review interface from this directory:
+
+```powershell
+python -m bout_splitter.review_app
+```
+
+Open `http://127.0.0.1:8765/` if the browser does not open automatically. Select a full bout recording, adjust the light-detection settings if needed, and generate clips. Review each clip in the browser and mark it usable or discarded. The score at touch is metadata, not a detection signal. Discarded clips are never uploaded.
+
+Enter the match details and the origin of the Whatsthecall site (for example, `http://localhost:3000` when it is running locally, or its deployed HTTPS URL), then sign in. The local tool uses the site's login, presign, and register endpoints; each approved MP4 goes directly to S3 using a presigned URL. Uploads can be retried after a failure without re-uploading already registered clips.
+
+The source video, clips, and review state remain under the ignored `runs/` directory. Credentials are kept only in memory for the current review-app session. Stop the server with Ctrl+C. To use another local port, pass `--port 8766`.
+
 ## Probe A Video
 
 ```powershell

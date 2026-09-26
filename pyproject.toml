@@ -11,6 +11,10 @@ all = ["av>=11", "numpy", "faster-whisper>=1.0"]
 
 [project.scripts]
 bout-splitter = "bout_splitter.cli:main"
+bout-splitter-gui = "bout_splitter.review_app:main"
+
+[tool.setuptools.package-data]
+bout_splitter = ["static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
