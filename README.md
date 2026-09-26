@@ -76,6 +76,23 @@ To cut candidate clips from detected light events:
 python -m bout_splitter split-lights "C:\path\to\bout.mp4" --out light_clips
 ```
 
+Video clips are re-encoded for accurate starts by default. `--stream-copy` is
+faster but may retain footage from an earlier keyframe, including a previous touch.
+Motion starts now require a sustained quiet setup followed by action. They are
+estimates, not verified timestamps for the referee's En garde command. Fallbacks
+and other review reasons are recorded per clip in the analysis JSON.
+
+To revise an existing run without redetecting its light events:
+
+```powershell
+python -m bout_splitter refine-lights light_clips_tuned/light_events.json --out light_clips_refined
+```
+
+Choose a fresh output folder. This preserves the original files and records
+old-to-new clip numbers and boundaries in `comparisons` in `light_events.json`.
+Add `--dry-run` to inspect ranges without exporting video. See
+[boundary review](docs/boundary-review.md) for the reported examples and limitations.
+
 Useful tuning options:
 
 ```powershell
@@ -92,7 +109,7 @@ Useful tuning options:
 --post-roll 2              # seconds after the light event
 ```
 
-For the Orleans sample, this produced usable first-pass candidates:
+The original Orleans run used these settings (the review found boundary errors):
 
 ```powershell
 python -m bout_splitter split-lights "C:\Users\Peter\Videos\whatsthecall\WomensFinal-2425 Orléans Sabre Grand Prix.mp4" --out light_clips_tuned --colors red,green --roi "0,0.78,1,1" --motion-roi "0,0,1,0.78" --min-pixels 500 --min-gap 5 --start-at 70 --end-at 590 --start-mode fixed-lookback --lookback 8

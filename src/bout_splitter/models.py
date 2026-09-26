@@ -77,6 +77,8 @@ class VideoPhraseClip:
     event: LightEvent
     output: str | None = None
     confidence: float = 1.0
+    start_method: str = "unknown"
+    review_reasons: list[str] = field(default_factory=list)
 
 
 def to_plain_json(value: Any) -> Any:

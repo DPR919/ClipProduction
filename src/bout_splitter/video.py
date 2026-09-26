@@ -194,13 +194,55 @@ def detect_light_events(
 
 
 def estimate_motion_threshold(samples: list[LightSample]) -> float:
-    values = [sample.motion for sample in samples if sample.motion > 0]
+    values = sorted(sample.motion for sample in samples if sample.motion >= 0)
     if not values:
         return 0.015
-    median = statistics.median(values)
-    deviations = [abs(value - median) for value in values]
-    mad = statistics.median(deviations) if deviations else 0.0
-    return max(0.012, median + (mad * 1.5))
+    # Use the quiet portion of this exchange, not the whole bout's moving camera.
+    quiet = values[int((len(values) - 1) * 0.25)]
+    return max(0.012, min(0.06, quiet * 1.8))
+
+
+def find_setup_start(
+    samples: list[LightSample], threshold: float, *, quiet_duration: float = 0.6,
+) -> float | None:
+    """Find a sustained quiet interval followed by sustained action.
+
+    Isolated pauses during an attack and camera cuts must not become starts.
+    The returned time approximates setup; it cannot identify spoken En garde.
+    """
+    if len(samples) < 3:
+        return None
+    step = statistics.median(b.time - a.time for a, b in zip(samples, samples[1:]))
+    runs: list[list[LightSample]] = []
+    current: list[LightSample] = []
+    for sample in samples:
+        if sample.motion <= threshold:
+            if current and sample.time - current[-1].time > step * 1.5:
+                runs.append(current)
+                current = []
+            current.append(sample)
+        elif current:
+            runs.append(current)
+            current = []
+    if current:
+        runs.append(current)
+    for run in reversed(runs):
+        if run[-1].time - run[0].time + step < quiet_duration - 1e-6:
+            continue
+        after = [s for s in samples if s.time > run[-1].time]
+        active_duration = 0.0
+        previous_time = run[-1].time
+        for sample in after:
+            if sample.time - previous_time > step * 1.5 or sample.motion >= 0.18:
+                break  # Missing observations or a likely camera transition.
+            previous_time = sample.time
+            if sample.motion > threshold:
+                active_duration += step
+                if active_duration >= 0.4 - 1e-6:
+                    return run[0].time
+            else:
+                active_duration = 0.0
+    return None
 
 
 def build_video_phrase_clips(
@@ -213,33 +255,52 @@ def build_video_phrase_clips(
     media_duration: float | None = None,
     motion_threshold: float | None = None,
     start_mode: str = "motion",
+    quiet_duration: float = 0.6,
 ) -> list[VideoPhraseClip]:
-    threshold = motion_threshold if motion_threshold is not None else estimate_motion_threshold(samples)
+    if start_mode not in {"motion", "fixed-lookback"}:
+        raise ValueError("start_mode must be 'motion' or 'fixed-lookback'.")
+    if any(not math.isfinite(v) or v < 0 for v in (lookback, pre_roll, post_roll, quiet_duration)):
+        raise ValueError("Timing settings must be finite and nonnegative.")
+    samples = sorted(samples, key=lambda s: s.time)
+    events = sorted(events, key=lambda e: e.start)
     clips: list[VideoPhraseClip] = []
 
-    for event in events:
-        floor = max(0.0, event.start - lookback)
+    for index, event in enumerate(events):
+        boundary = events[index - 1].end if index else 0.0
+        floor = max(0.0, boundary, event.start - lookback)
         start = floor
+        method = "fixed_lookback"
+        reasons = ["En garde timestamp is unverified"]
         if start_mode == "motion":
             window = [sample for sample in samples if floor <= sample.time <= event.start]
-            for sample in reversed(window):
-                if sample.motion <= threshold:
-                    start = max(0.0, sample.time - pre_roll)
-                    break
-        elif start_mode != "fixed-lookback":
-            raise ValueError("start_mode must be 'motion' or 'fixed-lookback'.")
-        end = event.peak_time + post_roll
+            threshold = motion_threshold if motion_threshold is not None else estimate_motion_threshold(window)
+            setup = find_setup_start(window, threshold, quiet_duration=quiet_duration)
+            if setup is not None:
+                start = max(floor, setup - pre_roll)
+                method = "sustained_setup_estimate"
+            else:
+                method = "lookback_fallback"
+                reasons.append("No sustained setup followed by action detected")
+        if event.end - event.start > 10:
+            reasons.append("Long light event may contain graphics or multiple exchanges")
+        end = event.start + post_roll
+        if index + 1 < len(events):
+            end = min(end, events[index + 1].start)
         if media_duration is not None:
             end = min(end, media_duration)
+        if end <= start:
+            continue
         clips.append(
             VideoPhraseClip(
                 index=len(clips) + 1,
                 clip_start=round(start, 3),
-                clip_end=round(max(start + 0.01, end), 3),
-                event_time=event.peak_time,
+                clip_end=round(end, 3),
+                event_time=event.start,
                 event_color=event.color,
                 event=event,
                 confidence=event.confidence,
+                start_method=method,
+                review_reasons=reasons,
             )
         )
     return clips

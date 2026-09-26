@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .cutter import cut_phrase_clips, cut_video_phrase_clips
 from .media import duration_seconds, extract_audio_wav, find_media_tool, probe_video
-from .models import to_plain_json
+from .models import LightEvent, LightSample, to_plain_json
 from .segmenter import pair_phrases
 from .signals import detect_audio_signals
 from .transcript import load_transcript, save_transcript, transcribe_audio
@@ -146,6 +146,7 @@ def _analyze_lights(args: argparse.Namespace):
         media_duration=media_duration,
         motion_threshold=args.motion_threshold,
         start_mode=args.start_mode,
+        quiet_duration=args.quiet_duration,
     )
     analysis_path = out_dir / "light_events.json"
     write_light_analysis(
@@ -165,6 +166,14 @@ def _analyze_lights(args: argparse.Namespace):
         events=events,
         clips=clips,
     )
+    payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    payload["settings"].update({
+        "lookback": args.lookback, "pre_roll": args.pre_roll,
+        "post_roll": args.post_roll, "quiet_duration": args.quiet_duration,
+        "motion_threshold": args.motion_threshold,
+        "min_event_duration": args.min_event_duration,
+    })
+    analysis_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     if args.debug_sheet:
         write_light_debug_sheet(
             args.input,
@@ -216,6 +225,48 @@ def command_split_lights(args: argparse.Namespace) -> int:
 
 def command_tools(_args: argparse.Namespace) -> int:
     _print_json({"ffmpeg": find_media_tool("ffmpeg"), "ffprobe": find_media_tool("ffprobe")})
+    return 0
+
+
+def command_refine_lights(args: argparse.Namespace) -> int:
+    source = json.loads(args.analysis.read_text(encoding="utf-8"))
+    out_dir = args.out.resolve()
+    if out_dir == args.analysis.resolve().parent or list(out_dir.glob("light_phrase_*.mp4")):
+        raise ValueError("Choose a fresh output directory to preserve earlier clips and numbering.")
+    events = [LightEvent(**item) for item in source["events"]]
+    samples = [LightSample(**item) for item in source["samples"]]
+    clips = build_video_phrase_clips(
+        events, samples, lookback=args.lookback, pre_roll=args.pre_roll,
+        post_roll=args.post_roll, media_duration=source["duration"],
+        quiet_duration=args.quiet_duration, motion_threshold=args.motion_threshold,
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        clips = cut_video_phrase_clips(source["input"], clips, out_dir, ffmpeg_path=args.ffmpeg)
+    old_clips = {c["event"]["index"]: c for c in source["clips"]}
+    comparisons = []
+    for clip in clips:
+        old = old_clips.get(clip.event.index)
+        comparisons.append({
+            "original_clip": old["index"] if old else None,
+            "revised_clip": clip.index,
+            "old_start": old["clip_start"] if old else None,
+            "new_start": clip.clip_start,
+            "old_end": old["clip_end"] if old else None,
+            "new_end": clip.clip_end,
+            "start_method": clip.start_method,
+        })
+    source["refined_from"] = str(args.analysis.resolve())
+    source["settings"].update({
+        "lookback": args.lookback, "pre_roll": args.pre_roll,
+        "post_roll": args.post_roll, "quiet_duration": args.quiet_duration,
+        "motion_threshold": args.motion_threshold, "start_mode": "motion",
+        "reencode": True, "dry_run": args.dry_run,
+    })
+    source["clips"] = to_plain_json(clips)
+    source["comparisons"] = comparisons
+    (out_dir / "light_events.json").write_text(json.dumps(source, indent=2), encoding="utf-8")
+    _print_json({"clips": len(clips), "analysis": str(out_dir / "light_events.json"), "dry_run": args.dry_run})
     return 0
 
 
@@ -278,6 +329,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--pre-roll", type=float, default=0.5)
         command.add_argument("--post-roll", type=float, default=2.0)
         command.add_argument("--motion-threshold", type=float)
+        command.add_argument("--quiet-duration", type=float, default=0.6)
         command.add_argument("--start-mode", choices=["motion", "fixed-lookback"], default="motion")
         command.add_argument("--debug-sheet", action=argparse.BooleanOptionalAction, default=True)
         command.add_argument("--max-debug-events", type=int, default=24)
@@ -291,8 +343,22 @@ def build_parser() -> argparse.ArgumentParser:
     split_lights = subparsers.add_parser("split-lights", help="Cut clips from detected light events.")
     add_light_args(split_lights)
     split_lights.add_argument("--dry-run", action="store_true")
-    split_lights.add_argument("--reencode", action="store_true", help="Re-encode clips for frame-accurate starts.")
+    encoding = split_lights.add_mutually_exclusive_group()
+    encoding.add_argument("--reencode", dest="reencode", action="store_true", default=True, help="Frame-accurate cutting (default).")
+    encoding.add_argument("--stream-copy", dest="reencode", action="store_false", help="Fast but may retain video before the requested start.")
     split_lights.set_defaults(func=command_split_lights)
+
+    refine = subparsers.add_parser("refine-lights", help="Revise starts from a saved analysis, keeping its light events.")
+    refine.add_argument("analysis", type=Path)
+    refine.add_argument("--out", type=Path, required=True)
+    refine.add_argument("--lookback", type=float, default=8.0)
+    refine.add_argument("--pre-roll", type=float, default=0.5)
+    refine.add_argument("--post-roll", type=float, default=2.0)
+    refine.add_argument("--quiet-duration", type=float, default=0.6)
+    refine.add_argument("--motion-threshold", type=float)
+    refine.add_argument("--ffmpeg")
+    refine.add_argument("--dry-run", action="store_true")
+    refine.set_defaults(func=command_refine_lights)
 
     return parser
 

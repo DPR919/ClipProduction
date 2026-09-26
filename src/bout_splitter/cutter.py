@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 from .media import find_media_tool
@@ -97,7 +98,7 @@ def cut_video_phrase_clips(
     output_dir: str | Path,
     *,
     ffmpeg_path: str | None = None,
-    reencode: bool = False,
+    reencode: bool = True,
 ) -> list[VideoPhraseClip]:
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -114,15 +115,6 @@ def cut_video_phrase_clips(
             reencode=reencode,
         )
         completed.append(
-            VideoPhraseClip(
-                index=clip.index,
-                clip_start=clip.clip_start,
-                clip_end=clip.clip_end,
-                event_time=clip.event_time,
-                event_color=clip.event_color,
-                event=clip.event,
-                output=str(output),
-                confidence=clip.confidence,
-            )
+            replace(clip, output=str(output))
         )
     return completed
