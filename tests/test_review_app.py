@@ -7,14 +7,13 @@ import tempfile
 import threading
 import unittest
 from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from bout_splitter.models import LightSample
 from bout_splitter.media import MediaToolError, duration_seconds, find_media_tool
-from bout_splitter.review_app import ReviewManager, make_handler, validate_review, validate_settings
+from bout_splitter.review_app import LocalReviewServer, ReviewManager, make_handler, validate_review, validate_settings
 from bout_splitter.upload_client import UploadError, normalize_site_url
 
 
@@ -170,7 +169,7 @@ class ReviewAppTests(unittest.TestCase):
         self.assertAlmostEqual(duration_seconds(original), 3, delta=0.08)
 
     def test_http_range_and_review_request(self):
-        server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.manager))
+        server = LocalReviewServer(("127.0.0.1", 0), make_handler(self.manager))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         self.addCleanup(server.server_close)
@@ -201,6 +200,12 @@ class ReviewAppTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertEqual(json.load(response)["job"]["clips"][0]["trim_begin"], 0.25)
+
+    def test_local_server_refuses_duplicate_port(self):
+        server = LocalReviewServer(("127.0.0.1", 0), make_handler(self.manager))
+        self.addCleanup(server.server_close)
+        with self.assertRaises(OSError):
+            LocalReviewServer(("127.0.0.1", server.server_port), make_handler(self.manager))
 
     def test_interrupted_upload_is_retryable(self):
         job = self.manager.get(self.job_id)

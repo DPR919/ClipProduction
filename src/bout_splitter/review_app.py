@@ -37,6 +37,10 @@ MAX_SOURCE_BYTES = 8 * 1024 * 1024 * 1024
 CHUNK_SIZE = 1024 * 1024
 
 
+class LocalReviewServer(ThreadingHTTPServer):
+    allow_reuse_address = False
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -628,7 +632,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args(argv)
     manager = ReviewManager(args.runs)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), make_handler(manager))
+    try:
+        server = LocalReviewServer(("127.0.0.1", args.port), make_handler(manager))
+    except OSError as exc:
+        raise SystemExit(f"Could not start review app on port {args.port}. Is it already running? {exc}") from exc
     url = f"http://127.0.0.1:{server.server_port}/"
     print(f"Bout Splitter review UI: {url}", flush=True)
     if not args.no_browser:
