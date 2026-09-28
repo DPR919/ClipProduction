@@ -34,3 +34,4 @@ main{max-width:1500px;margin:auto;padding:26px 28px 50px}.page-heading{display:f
 @media(max-width:740px){.trim-editor{padding:14px 12px}.trim-actions .btn{flex:1 0 auto}.top-status{max-width:calc(100vw - 170px);overflow:hidden;text-overflow:ellipsis}}
 .clip-name,.clip-time{display:block}.clip-item>span:first-child{min-width:0}
 .page-heading>div{min-width:0}.page-heading p{overflow-wrap:anywhere}
+.title-prefix-field{max-width:360px;margin-top:15px}

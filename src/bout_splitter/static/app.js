@@ -93,6 +93,7 @@ function renderGenerate() {
     <div class="page-heading"><div><h1>Generate clips</h1><p>Select a full bout recording.</p></div></div>
     ${job ? `<section class="section compact"><div class="status-line">${job.state === 'processing' ? '<span class="busy"></span>' : ''}<strong>${escapeHtml(job.phase)}</strong><span class="muted">${escapeHtml(job.source_name)}</span></div>${job.error ? `<p class="error">${escapeHtml(job.error)}</p>` : ''}${job.state === 'ready' ? `<div class="actions"><button class="btn primary" id="go-review">Review ${job.clips.length} clips</button></div>` : ''}</section>` : ''}
     <section class="section"><h2>Source recording</h2><div class="field"><label for="source">Video file</label><input id="source" type="file" accept=".mp4,.mov,.mkv,.webm,video/*"></div>
+      <div class="title-prefix-field">${field('titlePrefix','Clip title prefix','text',job?.title_prefix ?? 'Phrase','maxlength="100" required')}</div>
       <div id="upload-progress" hidden><div class="progress"><span id="upload-bar" style="width:0%"></span></div><small id="upload-pct">Copying source video…</small></div>
       <div class="actions"><button class="btn primary" id="generate-btn" ${job?.state === 'processing' ? 'disabled' : ''}>Generate clips</button><span class="muted">Local processing. Your source file is not uploaded to Whatsthecall.</span></div></section>
     <section class="section"><h2>Detection settings</h2><div class="form-grid four">
@@ -133,7 +134,7 @@ function augmentGenerate() {
     field('greenRoi','Green light area','text',greenArea));
   document.querySelector('#roi').parentElement.hidden = true;
   const source = document.querySelector('#source');
-  source.parentElement.insertAdjacentHTML('afterend', `
+  document.querySelector('.title-prefix-field').insertAdjacentHTML('afterend', `
     <div id="source-stage" class="source-stage" ${job ? '' : 'hidden'}>
       <video id="source-preview" controls preload="metadata" ${job ? `src="/source/${job.id}"` : ''}></video>
       <div id="roi-overlay" class="roi-overlay"><div id="red-box" class="roi-box red-box"></div><div id="green-box" class="roi-box green-box"></div></div>
@@ -224,19 +225,21 @@ function field(id, label, type, value, extra = '') {
 async function generate() {
   const file = document.querySelector('#source').files[0];
   if (!file && !job) return notify('Choose a full bout video first.', true);
+  const titlePrefix = document.querySelector('#titlePrefix').value.trim();
+  if (!titlePrefix) return notify('Enter a clip title prefix.', true);
   const names = ['fps','minPixels','minGap','lookback','startAt','endAt','referenceAt','roi','redRoi','greenRoi','motionRoi'];
   const settings = Object.fromEntries(names.map(name => [name, document.getElementById(name).value]));
   if (!file) {
     const button = document.querySelector('#generate-btn');
     button.disabled = true;
     try {
-      const data = await api(`/api/jobs/${job.id}/reanalyze`, settings);
+      const data = await api(`/api/jobs/${job.id}/reanalyze`, {...settings, titlePrefix});
       view = 'generate';
       setJob(data.job);
     } catch (error) { button.disabled = false; notify(error.message, true); }
     return;
   }
-  const url = `/api/jobs?name=${encodeURIComponent(file.name)}&settings=${encodeURIComponent(JSON.stringify(settings))}`;
+  const url = `/api/jobs?name=${encodeURIComponent(file.name)}&titlePrefix=${encodeURIComponent(titlePrefix)}&settings=${encodeURIComponent(JSON.stringify(settings))}`;
   const request = new XMLHttpRequest();
   request.open('POST', url);
   request.setRequestHeader('X-Local-Request', 'review-ui');

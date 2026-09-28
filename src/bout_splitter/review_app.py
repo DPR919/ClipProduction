@@ -81,6 +81,15 @@ def validate_settings(data: dict) -> dict:
     }
 
 
+def validate_title_prefix(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("Enter a clip title prefix of up to 100 characters.")
+    prefix = value.strip()
+    if not prefix or len(prefix) > 100 or not prefix.isprintable():
+        raise ValueError("Enter a clip title prefix of up to 100 printable characters.")
+    return prefix
+
+
 def validate_shared_metadata(shared: dict) -> dict:
     if not isinstance(shared, dict):
         raise ValueError("Enter the match details before uploading.")
@@ -174,16 +183,18 @@ class ReviewManager:
             jobs = sorted(self.root.glob("*/manifest.json"), key=lambda p: p.stat().st_mtime, reverse=True)
             return json.loads(jobs[0].read_text(encoding="utf-8")) if jobs else None
 
-    def _new_job(self, job_id: str, name: str, settings: dict) -> dict:
+    def _new_job(self, job_id: str, name: str, settings: dict, title_prefix: str = "Phrase") -> dict:
         return {
             "id": job_id, "source_name": Path(name).name, "state": "processing",
             "phase": "Analyzing video", "error": None, "created_at": utc_now(),
+            "title_prefix": validate_title_prefix(title_prefix),
             "settings": {key: (asdict(value) if isinstance(value, Roi) else value) for key, value in settings.items()},
             "shared": {"eventName": "", "leftFencer": "", "rightFencer": "", "weapon": "sabre", "sourceUrl": ""},
             "clips": [], "upload_state": "idle", "upload_error": None, "upload_site": None,
         }
 
-    def create_from_stream(self, name: str, size: int, stream, settings: dict) -> dict:
+    def create_from_stream(self, name: str, size: int, stream, settings: dict, title_prefix: str = "Phrase") -> dict:
+        title_prefix = validate_title_prefix(title_prefix)
         suffix = Path(name).suffix.lower()
         if suffix not in ALLOWED_EXTENSIONS or size < 1 or size > MAX_SOURCE_BYTES:
             raise ValueError("Choose an MP4, MOV, MKV, or WebM file up to 8 GB.")
@@ -199,7 +210,7 @@ class ReviewManager:
                     raise ValueError("The source video upload ended early.")
                 output.write(chunk)
                 remaining -= len(chunk)
-        job = self._new_job(job_id, name, settings)
+        job = self._new_job(job_id, name, settings, title_prefix)
         with self.lock:
             self._write(job)
         threading.Thread(target=self._generate, args=(job_id,), daemon=True).start()
@@ -212,10 +223,13 @@ class ReviewManager:
             raise FileNotFoundError("Unknown source video.")
         return self._job_dir(job_id) / ("source" + suffix)
 
-    def reanalyze(self, job_id: str, settings: dict) -> dict:
+    def reanalyze(self, job_id: str, settings: dict, title_prefix: str | None = None) -> dict:
         original = self.get(job_id)
         if original["state"] == "processing":
             raise ValueError("Wait for the current analysis to finish.")
+        title_prefix = validate_title_prefix(
+            title_prefix if title_prefix is not None else original.get("title_prefix", "Phrase")
+        )
         source = self.source_path(job_id)
         new_id = uuid.uuid4().hex[:12]
         directory = self.root / new_id
@@ -224,7 +238,7 @@ class ReviewManager:
             os.link(source, directory / source.name)
         except OSError as exc:
             raise ValueError(f"Could not reuse the saved source video: {exc}") from exc
-        job = self._new_job(new_id, original["source_name"], settings)
+        job = self._new_job(new_id, original["source_name"], settings, title_prefix)
         with self.lock:
             self._write(job)
         threading.Thread(target=self._generate, args=(new_id,), daemon=True).start()
@@ -300,7 +314,7 @@ class ReviewManager:
                     "index": clip.index, "file": output.name, "clip_start": clip.clip_start,
                     "clip_end": clip.clip_end, "event_time": clip.event_time,
                     "start_method": clip.start_method, "review_reasons": clip.review_reasons,
-                    "decision": "pending", "title": f"Phrase {clip.index:03d}",
+                    "decision": "pending", "title": f"{job.get('title_prefix', 'Phrase')} {clip.index:03d}",
                     "scoreAtTouch": "", "notes": "", "upload_status": "pending",
                     "s3_key": None, "remote_clip_id": None, "upload_error": None,
                 })
@@ -590,10 +604,13 @@ def make_handler(manager: ReviewManager):
                 url = urlparse(self.path)
                 if url.path == "/api/jobs":
                     size = int(self.headers.get("Content-Length", "0"))
-                    query = parse_qs(url.query)
+                    query = parse_qs(url.query, keep_blank_values=True)
                     name = query.get("name", [""])[0]
                     settings = validate_settings(json.loads(query.get("settings", ["{}"])[0]))
-                    return self._json(201, {"job": manager.create_from_stream(name, size, self.rfile, settings)})
+                    title_prefix = validate_title_prefix(query.get("titlePrefix", ["Phrase"])[0])
+                    return self._json(201, {"job": manager.create_from_stream(
+                        name, size, self.rfile, settings, title_prefix,
+                    )})
                 if url.path == "/api/login":
                     data = self._read_json()
                     return self._json(200, manager.login(data.get("site", ""), data.get("email", ""), data.get("password", "")))
@@ -611,8 +628,9 @@ def make_handler(manager: ReviewManager):
                         return self._json(202, {"job": manager.start_upload(job_id)})
                 match = re.fullmatch(r"/api/jobs/([0-9a-f]{12})/reanalyze", url.path)
                 if match:
+                    data = self._read_json()
                     return self._json(201, {"job": manager.reanalyze(
-                        match.group(1), validate_settings(self._read_json()),
+                        match.group(1), validate_settings(data), data.get("titlePrefix"),
                     )})
                 self._json(404, {"error": "Unknown endpoint."})
             except FileNotFoundError:

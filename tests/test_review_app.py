@@ -13,7 +13,9 @@ from unittest.mock import patch
 
 from bout_splitter.models import LightSample
 from bout_splitter.media import MediaToolError, duration_seconds, find_media_tool
-from bout_splitter.review_app import LocalReviewServer, ReviewManager, make_handler, validate_review, validate_settings
+from bout_splitter.review_app import (
+    LocalReviewServer, ReviewManager, make_handler, validate_review, validate_settings, validate_title_prefix,
+)
 from bout_splitter.upload_client import UploadError, normalize_site_url
 
 
@@ -192,6 +194,12 @@ class ReviewAppTests(unittest.TestCase):
         response = connection.getresponse()
         self.assertEqual(response.status, 200)
         self.assertEqual(json.load(response)["job"]["clips"][0]["decision"], "keep")
+        with patch.object(self.manager, "_generate"):
+            connection.request("POST", "/api/jobs?name=another.mp4&titlePrefix=Touch%20point&settings=%7B%7D",
+                               b"test", headers={"X-Local-Request": "review-ui"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 201)
+            self.assertEqual(json.load(response)["job"]["title_prefix"], "Touch point")
         with patch("bout_splitter.review_app.duration_seconds", return_value=2.0), \
              patch("bout_splitter.review_app.cut_time_range", side_effect=lambda a,b,c,d,*,reencode: d.write_bytes(b"crop")):
             connection.request("POST", f"/api/jobs/{self.job_id}/trim",
@@ -222,6 +230,7 @@ class ReviewAppTests(unittest.TestCase):
         job = self.manager.get(self.job_id)
         job["state"] = "processing"
         job["clips"] = []
+        job["title_prefix"] = "Touch"
         self.manager._write(job)
         clip = SimpleNamespace(index=1, clip_start=1.25, clip_end=3.5, event_time=3.0,
                                start_method="sustained_setup_estimate", review_reasons=[])
@@ -244,19 +253,38 @@ class ReviewAppTests(unittest.TestCase):
         ready = self.manager.get(self.job_id)
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(ready["clips"][0]["decision"], "pending")
+        self.assertEqual(ready["clips"][0]["title"], "Touch 001")
         self.assertEqual(self.manager.clip_path(self.job_id, 1).read_bytes(), b"mp4")
 
     def test_reanalysis_preserves_review_and_reuses_source(self):
         self._review_all()
+        original = self.manager.get(self.job_id)
+        original["title_prefix"] = "Hit"
+        self.manager._write(original)
         settings = validate_settings({"referenceAt": "7:00", "minGap": 1.5})
         with patch("bout_splitter.review_app.threading.Thread.start"):
             new_job = self.manager.reanalyze(self.job_id, settings)
+            renamed_job = self.manager.reanalyze(self.job_id, settings, "Exchange")
         self.assertNotEqual(new_job["id"], self.job_id)
         self.assertEqual(new_job["settings"]["reference_at"], 420)
         self.assertEqual(new_job["settings"]["min_gap"], 1.5)
+        self.assertEqual(new_job["title_prefix"], "Hit")
+        self.assertEqual(renamed_job["title_prefix"], "Exchange")
         self.assertEqual(new_job["state"], "processing")
         self.assertEqual(self.manager.source_path(new_job["id"]).read_bytes(), b"test")
         self.assertEqual(self.manager.get(self.job_id)["clips"][0]["decision"], "keep")
+
+    def test_title_prefix_defaults_and_validation(self):
+        self.assertEqual(self.manager.get(self.job_id)["title_prefix"], "Phrase")
+        self.assertEqual(validate_title_prefix("  Touch  "), "Touch")
+        for value in ("", "  ", "X" * 101, "Touch\nnext", None):
+            with self.assertRaises(ValueError):
+                validate_title_prefix(value)
+        with patch("bout_splitter.review_app.threading.Thread.start"):
+            new_job = self.manager.create_from_stream(
+                "custom.mp4", 4, io.BytesIO(b"test"), validate_settings({}), "Exchange",
+            )
+        self.assertEqual(self.manager.get(new_job["id"])["title_prefix"], "Exchange")
 
     def test_settings_accept_color_regions_and_known_touch(self):
         settings = validate_settings({"referenceAt": "7:00", "redRoi": "0.08,0.74,0.47,0.9",
