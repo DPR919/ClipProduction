@@ -55,17 +55,19 @@ def _crop(frame, roi: Roi):
     return frame[y1:y2, x1:x2]
 
 
-def score_frame(frame, *, roi: Roi = Roi(), previous_frame=None, motion_roi: Roi | None = None) -> LightSample:
+def score_frame(
+    frame, *, roi: Roi = Roi(), red_roi: Roi | None = None,
+    green_roi: Roi | None = None, previous_frame=None, motion_roi: Roi | None = None,
+) -> LightSample:
     _av, np = _require_video_dependencies()
     region = _crop(frame, roi).astype(np.int16)
-    red = region[:, :, 0]
-    green = region[:, :, 1]
-    blue = region[:, :, 2]
+    red_region = _crop(frame, red_roi).astype(np.int16) if red_roi else region
+    green_region = _crop(frame, green_roi).astype(np.int16) if green_roi else region
     area = max(1, region.shape[0] * region.shape[1])
 
-    red_mask = (red >= 185) & (red > green * 1.45) & (red > blue * 1.45)
-    green_mask = (green >= 165) & (green > red * 1.25) & (green > blue * 1.25)
-    white_mask = (red >= 220) & (green >= 220) & (blue >= 220) & ((region.max(axis=2) - region.min(axis=2)) <= 35)
+    red_mask = (red_region[:, :, 0] >= 185) & (red_region[:, :, 0] > red_region[:, :, 1] * 1.45) & (red_region[:, :, 0] > red_region[:, :, 2] * 1.45)
+    green_mask = (green_region[:, :, 1] >= 165) & (green_region[:, :, 1] > green_region[:, :, 0] * 1.25) & (green_region[:, :, 1] > green_region[:, :, 2] * 1.25)
+    white_mask = (region[:, :, 0] >= 220) & (region[:, :, 1] >= 220) & (region[:, :, 2] >= 220) & ((region.max(axis=2) - region.min(axis=2)) <= 35)
 
     motion = 0.0
     if previous_frame is not None:
@@ -82,8 +84,8 @@ def score_frame(frame, *, roi: Roi = Roi(), previous_frame=None, motion_roi: Roi
         red_pixels=red_pixels,
         green_pixels=green_pixels,
         white_pixels=white_pixels,
-        red_ratio=red_pixels / area,
-        green_ratio=green_pixels / area,
+        red_ratio=red_pixels / max(1, red_region.shape[0] * red_region.shape[1]),
+        green_ratio=green_pixels / max(1, green_region.shape[0] * green_region.shape[1]),
         white_ratio=white_pixels / area,
         motion=motion,
     )
@@ -94,25 +96,36 @@ def sample_video_lights(
     *,
     fps: float = 5.0,
     roi: Roi = Roi(),
+    red_roi: Roi | None = None,
+    green_roi: Roi | None = None,
     motion_roi: Roi | None = None,
+    start_at: float = 0.0,
+    end_at: float | None = None,
 ) -> list[LightSample]:
     av, _np = _require_video_dependencies()
     samples: list[LightSample] = []
     interval = 1.0 / fps
-    next_time = 0.0
+    next_time = start_at
     previous_frame = None
 
     with av.open(str(input_path)) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
+        if start_at > 0:
+            container.seek(int(start_at / float(stream.time_base)), stream=stream, backward=True)
         for frame in container.decode(stream):
             if frame.time is None:
                 continue
             time = float(frame.time)
+            if end_at is not None and time > end_at:
+                break
             if time + 1e-6 < next_time:
                 continue
             rgb = frame.to_ndarray(format="rgb24")
-            score = score_frame(rgb, roi=roi, previous_frame=previous_frame, motion_roi=motion_roi)
+            score = score_frame(
+                rgb, roi=roi, red_roi=red_roi, green_roi=green_roi,
+                previous_frame=previous_frame, motion_roi=motion_roi,
+            )
             samples.append(
                 LightSample(
                     time=round(time, 3),
@@ -193,6 +206,81 @@ def detect_light_events(
     return events
 
 
+def calibrate_light_threshold(
+    samples: list[LightSample], reference_at: float, *, minimum: int = 80,
+    radius: float = 8.0,
+) -> tuple[int, float, str]:
+    """Estimate the active-light level from a known touch neighborhood."""
+    best: tuple[float, float, str, float] | None = None
+    for index, sample in enumerate(samples):
+        if abs(sample.time - reference_at) > radius:
+            continue
+        before = [s for s in samples[max(0, index - 8):index] if sample.time - s.time <= 1.6]
+        after = [s for s in samples[index:index + 3] if s.time - sample.time <= 0.5]
+        if len(before) < 4 or len(after) < 2:
+            continue
+        for color in ("red", "green"):
+            baseline = statistics.median(getattr(s, f"{color}_pixels") for s in before)
+            level = min(getattr(s, f"{color}_pixels") for s in after[:2])
+            rise = level - baseline
+            if best is None or rise > best[0]:
+                best = (rise, sample.time, color, baseline)
+    if best is None or best[0] < minimum * 1.5:
+        raise ValueError("No clear scoring-light transition near the known touch. Adjust its time or light area.")
+    rise, time, color, baseline = best
+    return max(minimum, round(baseline + rise * 0.35)), time, color
+
+
+def detect_light_onsets(
+    samples: list[LightSample], *, min_pixels: int, min_gap: float = 1.5,
+    colors: set[str] | None = None,
+) -> list[LightEvent]:
+    """Detect sustained transitions, rather than merging every bright frame into one event."""
+    allowed = colors or {"red", "green"}
+    samples = sorted(samples, key=lambda sample: sample.time)
+    runs: list[tuple[float, float, str, LightSample]] = []
+    for color in sorted(allowed):
+        active: list[LightSample] = []
+        lows = 0
+        for index, sample in enumerate(samples):
+            value = getattr(sample, f"{color}_pixels")
+            if value >= min_pixels:
+                if not active:
+                    following = samples[index:index + 3]
+                    if sum(
+                        getattr(other, f"{color}_pixels") >= min_pixels
+                        and other.time - sample.time <= 0.5
+                        for other in following
+                    ) < 2:
+                        continue
+                active.append(sample)
+                lows = 0
+            elif active:
+                lows += 1
+                if lows >= 2:
+                    peak = max(active, key=lambda item: getattr(item, f"{color}_pixels"))
+                    runs.append((active[0].time, active[-1].time, color, peak))
+                    active = []
+                    lows = 0
+        if active:
+            peak = max(active, key=lambda item: getattr(item, f"{color}_pixels"))
+            runs.append((active[0].time, active[-1].time, color, peak))
+
+    events: list[LightEvent] = []
+    for start, end, color, peak in sorted(runs, key=lambda run: run[0]):
+        if events and start - events[-1].start < min_gap:
+            continue
+        pixels = getattr(peak, f"{color}_pixels")
+        events.append(LightEvent(
+            index=len(events) + 1,
+            start=round(start, 3), end=round(end, 3), peak_time=round(peak.time, 3),
+            color=color, red_pixels=peak.red_pixels, green_pixels=peak.green_pixels,
+            white_pixels=peak.white_pixels,
+            confidence=round(min(1.0, pixels / max(min_pixels * 2, 1)), 3),
+        ))
+    return events
+
+
 def estimate_motion_threshold(samples: list[LightSample]) -> float:
     values = sorted(sample.motion for sample in samples if sample.motion >= 0)
     if not values:
@@ -266,7 +354,7 @@ def build_video_phrase_clips(
     clips: list[VideoPhraseClip] = []
 
     for index, event in enumerate(events):
-        boundary = events[index - 1].end if index else 0.0
+        boundary = min(events[index - 1].end, events[index - 1].start + post_roll) if index else 0.0
         floor = max(0.0, boundary, event.start - lookback)
         start = floor
         method = "fixed_lookback"
@@ -323,6 +411,8 @@ def write_light_analysis(
     samples: list[LightSample],
     events: list[LightEvent],
     clips: list[VideoPhraseClip],
+    red_roi: Roi | None = None,
+    green_roi: Roi | None = None,
 ) -> None:
     payload = {
         "input": str(input_path),
@@ -330,6 +420,8 @@ def write_light_analysis(
         "settings": {
             "fps": fps,
             "roi": to_plain_json(roi),
+            "red_roi": to_plain_json(red_roi),
+            "green_roi": to_plain_json(green_roi),
             "motion_roi": to_plain_json(motion_roi),
             "min_pixels": min_pixels,
             "colors": sorted(colors),

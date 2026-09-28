@@ -29,6 +29,10 @@ python -m bout_splitter.review_app
 
 Open `http://127.0.0.1:8765/` if the browser does not open automatically. Select a full bout recording, adjust the light-detection settings if needed, and generate clips. Review each clip in the browser and mark it usable or discarded. The score at touch is metadata, not a detection signal. Discarded clips are never uploaded.
 
+In Review, drag the Begin and End handles on a clip's timeline to crop the generated clip. The change is saved when you release a handle; you can also seek in the video and use **Set Begin** or **Set End**. **Play selection** previews the chosen range, and **Reset** restores the full clip. The original generated clip stays intact so you can expand the crop later. Upload sends the cropped MP4 for usable clips; a clip already sent to S3 cannot be recropped.
+
+Broadcast graphics vary by recording. In Generate, seek the source preview to a known touch, mark that time, and select separate red and green scoring-light areas. Set the bout start/end if the recording includes a long walkout or outro. The app calibrates its pixel threshold near the known touch and detects each light onset instead of treating a long-lived color as one event. If colored graphics dominate the sampled frames, analysis stops and asks for tighter areas or calibration. From an existing run, use **Re-analyze saved recording**; this creates a new run without copying the source video or changing earlier review decisions.
+
 Enter the match details and the origin of the Whatsthecall site (for example, `http://localhost:3000` when it is running locally, or its deployed HTTPS URL), then sign in. The local tool uses the site's login, presign, and register endpoints; each approved MP4 goes directly to S3 using a presigned URL. Uploads can be retried after a failure without re-uploading already registered clips.
 
 The source video, clips, and review state remain under the ignored `runs/` directory. Credentials are kept only in memory for the current review-app session. Stop the server with Ctrl+C. To use another local port, pass `--port 8766`.

@@ -1,7 +1,10 @@
 import unittest
 
 from bout_splitter.models import LightEvent, LightSample
-from bout_splitter.video import build_video_phrase_clips, detect_light_events, find_setup_start, parse_roi
+from bout_splitter.video import (
+    build_video_phrase_clips, calibrate_light_threshold, detect_light_events,
+    detect_light_onsets, find_setup_start, parse_roi, Roi, score_frame,
+)
 
 
 class VideoAnalysisTests(unittest.TestCase):
@@ -36,6 +39,31 @@ class VideoAnalysisTests(unittest.TestCase):
         self.assertEqual(clips[1].start_method, "lookback_fallback")
         self.assertTrue(clips[1].review_reasons)
 
+    def test_persistent_graphics_do_not_hide_later_light_onsets(self):
+        samples = []
+        for index in range(130):
+            time = index * 0.2
+            red = 900 if time >= 2 else 0
+            green = 18000 if 7 <= time < 10 else 0
+            if 20 <= time < 23:
+                red = 18000
+            samples.append(LightSample(time, red, green, 0, 0, 0, 0, 0.02))
+        threshold, detected_at, color = calibrate_light_threshold(samples, 6.5, minimum=500)
+        self.assertEqual(color, "green")
+        self.assertAlmostEqual(detected_at, 7.0)
+        self.assertGreater(threshold, 5000)
+        events = detect_light_onsets(samples, min_pixels=threshold, min_gap=1.5)
+        self.assertEqual([(round(event.start), event.color) for event in events], [(7, "green"), (20, "red")])
+
+    def test_long_previous_light_does_not_swallow_next_phrase(self):
+        events = [
+            LightEvent(1, 10, 100, 10, "red", 2000, 0, 0, 1),
+            LightEvent(2, 16, 18, 16, "green", 0, 2000, 0, 1),
+        ]
+        clips = build_video_phrase_clips(events, [], lookback=8)
+        self.assertEqual(len(clips), 2)
+        self.assertEqual(clips[1].clip_start, 12)
+
     def test_postroll_cannot_include_next_light_activation(self):
         events = [
             LightEvent(1, 10, 11, 10.8, "red", 2000, 0, 0, 1),
@@ -48,6 +76,17 @@ class VideoAnalysisTests(unittest.TestCase):
     def test_parse_roi(self):
         roi = parse_roi("0.1,0.2,0.9,0.8")
         self.assertEqual((roi.x1, roi.y1, roi.x2, roi.y2), (0.1, 0.2, 0.9, 0.8))
+
+    def test_separate_color_regions_exclude_opposite_graphics(self):
+        import numpy as np
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        frame[:, :5, 0] = 255
+        frame[:, 5:, 1] = 255
+        left, right = Roi(0, 0, 0.5, 1), Roi(0.5, 0, 1, 1)
+        matched = score_frame(frame, roi=Roi(0, 0, 1, 1), red_roi=left, green_roi=right)
+        swapped = score_frame(frame, roi=Roi(0, 0, 1, 1), red_roi=right, green_roi=left)
+        self.assertEqual((matched.red_pixels, matched.green_pixels), (50, 50))
+        self.assertEqual((swapped.red_pixels, swapped.green_pixels), (0, 0))
 
     def test_detect_light_events_merges_active_samples(self):
         samples = [

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -11,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from bout_splitter.models import LightSample
+from bout_splitter.media import MediaToolError, duration_seconds, find_media_tool
 from bout_splitter.review_app import ReviewManager, make_handler, validate_review, validate_settings
 from bout_splitter.upload_client import UploadError, normalize_site_url
 
@@ -97,6 +100,75 @@ class ReviewAppTests(unittest.TestCase):
         self.manager._upload(self.job_id, client)
         self.assertEqual([call[0] for call in client.calls], ["presign", "put", "register", "register"])
 
+    def test_crop_exports_from_original_and_uploads_edited_file(self):
+        self._review_all()
+        original = self.manager.clip_path(self.job_id, 1)
+        cuts = []
+
+        def fake_cut(source, start, end, output, *, reencode):
+            cuts.append((source, start, end, reencode))
+            output.write_bytes(b"cropped")
+
+        with patch("bout_splitter.review_app.duration_seconds", return_value=2.0), \
+             patch("bout_splitter.review_app.cut_time_range", side_effect=fake_cut):
+            job = self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.25, "end": 1.75})
+            first_edit = Path(self.temp.name) / self.job_id / "edited" / job["clips"][0]["trim_file"]
+            job = self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.5, "end": 1.5})
+        self.assertEqual(cuts, [(original, 0.25, 1.75, True), (original, 0.5, 1.5, True)])
+        self.assertEqual(original.read_bytes(), b"0123456789")
+        edited = Path(self.temp.name) / self.job_id / "edited" / job["clips"][0]["trim_file"]
+        self.assertEqual(edited.read_bytes(), b"cropped")
+        self.assertFalse(first_edit.exists())
+        client = FakeClient()
+        self.manager.client = client
+        with patch("bout_splitter.review_app.threading.Thread.start"):
+            self.manager.start_upload(self.job_id)
+        self.manager._upload(self.job_id, client)
+        self.assertEqual(client.calls[0], ("presign", edited.name))
+        self.assertEqual(client.calls[1], ("put", edited.name))
+        with self.assertRaisesRegex(ValueError, "already sent to S3"):
+            self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0, "end": 2})
+
+    def test_crop_validation_reset_and_failed_export(self):
+        with patch("bout_splitter.review_app.duration_seconds", return_value=2.0):
+            for begin, end in [(-1, 1), (0.5, 0.55), (0, 3), (float("nan"), 1)]:
+                with self.assertRaises(ValueError):
+                    self.manager.trim_clip(self.job_id, {"index": 1, "begin": begin, "end": end})
+            with patch("bout_splitter.review_app.cut_time_range", side_effect=RuntimeError("ffmpeg failed")):
+                with self.assertRaisesRegex(RuntimeError, "ffmpeg failed"):
+                    self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.2, "end": 1.8})
+            self.assertNotIn("trim_file", self.manager.get(self.job_id)["clips"][0])
+            with patch("bout_splitter.review_app.cut_time_range", side_effect=lambda a,b,c,d,*,reencode: d.write_bytes(b"crop")):
+                cropped = self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.2, "end": 1.8})
+            edited = Path(self.temp.name) / self.job_id / "edited" / cropped["clips"][0]["trim_file"]
+            reset = self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0, "end": 2})
+        self.assertIsNone(reset["clips"][0]["trim_file"])
+        self.assertFalse(edited.exists())
+        self.assertEqual((reset["clips"][0]["trim_begin"], reset["clips"][0]["trim_end"]), (0, 2))
+
+    def test_crop_locked_after_s3_put_even_if_registration_failed(self):
+        job = self.manager.get(self.job_id)
+        job["clips"][0]["s3_key"] = "clips/key"
+        job["clips"][0]["upload_status"] = "failed"
+        self.manager._write(job)
+        with self.assertRaisesRegex(ValueError, "already sent to S3"):
+            self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.2, "end": 1.8})
+
+    def test_real_crop_has_selected_duration(self):
+        try:
+            ffmpeg = find_media_tool("ffmpeg")
+            find_media_tool("ffprobe")
+        except MediaToolError as exc:
+            self.skipTest(str(exc))
+        original = self.manager.clip_path(self.job_id, 1)
+        subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+                        "testsrc2=size=160x90:rate=25:duration=3", "-c:v", "libx264",
+                        str(original)], check=True, capture_output=True)
+        job = self.manager.trim_clip(self.job_id, {"index": 1, "begin": 0.4, "end": 1.6})
+        edited = Path(self.temp.name) / self.job_id / "edited" / job["clips"][0]["trim_file"]
+        self.assertAlmostEqual(duration_seconds(edited), 1.2, delta=0.08)
+        self.assertAlmostEqual(duration_seconds(original), 3, delta=0.08)
+
     def test_http_range_and_review_request(self):
         server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.manager))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -121,6 +193,14 @@ class ReviewAppTests(unittest.TestCase):
         response = connection.getresponse()
         self.assertEqual(response.status, 200)
         self.assertEqual(json.load(response)["job"]["clips"][0]["decision"], "keep")
+        with patch("bout_splitter.review_app.duration_seconds", return_value=2.0), \
+             patch("bout_splitter.review_app.cut_time_range", side_effect=lambda a,b,c,d,*,reencode: d.write_bytes(b"crop")):
+            connection.request("POST", f"/api/jobs/{self.job_id}/trim",
+                               json.dumps({"index": 1, "begin": 0.25, "end": 1.5}),
+                               headers={"Content-Type": "application/json", "X-Local-Request": "review-ui"})
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.load(response)["job"]["clips"][0]["trim_begin"], 0.25)
 
     def test_interrupted_upload_is_retryable(self):
         job = self.manager.get(self.job_id)
@@ -146,17 +226,51 @@ class ReviewAppTests(unittest.TestCase):
             self.assertEqual((start, end), (1.25, 3.5))
             output.write_bytes(b"mp4")
 
+        def fake_analysis(path, **kwargs):
+            path.write_text(json.dumps({"settings": {}}), encoding="utf-8")
+
         with patch("bout_splitter.review_app.duration_seconds", return_value=10), \
              patch("bout_splitter.review_app.sample_video_lights", return_value=[]), \
-             patch("bout_splitter.review_app.detect_light_events", return_value=[]), \
+             patch("bout_splitter.review_app.detect_light_onsets", return_value=[]), \
              patch("bout_splitter.review_app.build_video_phrase_clips", return_value=[clip]), \
-             patch("bout_splitter.review_app.write_light_analysis"), \
+             patch("bout_splitter.review_app.write_light_analysis", side_effect=fake_analysis), \
              patch("bout_splitter.review_app.cut_time_range", side_effect=fake_cut):
             self.manager._generate(self.job_id)
         ready = self.manager.get(self.job_id)
         self.assertEqual(ready["state"], "ready")
         self.assertEqual(ready["clips"][0]["decision"], "pending")
         self.assertEqual(self.manager.clip_path(self.job_id, 1).read_bytes(), b"mp4")
+
+    def test_reanalysis_preserves_review_and_reuses_source(self):
+        self._review_all()
+        settings = validate_settings({"referenceAt": "7:00", "minGap": 1.5})
+        with patch("bout_splitter.review_app.threading.Thread.start"):
+            new_job = self.manager.reanalyze(self.job_id, settings)
+        self.assertNotEqual(new_job["id"], self.job_id)
+        self.assertEqual(new_job["settings"]["reference_at"], 420)
+        self.assertEqual(new_job["settings"]["min_gap"], 1.5)
+        self.assertEqual(new_job["state"], "processing")
+        self.assertEqual(self.manager.source_path(new_job["id"]).read_bytes(), b"test")
+        self.assertEqual(self.manager.get(self.job_id)["clips"][0]["decision"], "keep")
+
+    def test_settings_accept_color_regions_and_known_touch(self):
+        settings = validate_settings({"referenceAt": "7:00", "redRoi": "0.08,0.74,0.47,0.9",
+                                      "greenRoi": "0.53,0.74,0.92,0.9"})
+        self.assertEqual(settings["reference_at"], 420)
+        self.assertEqual(settings["red_roi"].x1, 0.08)
+        self.assertEqual(settings["green_roi"].x1, 0.53)
+
+    def test_pervasive_graphics_require_calibration(self):
+        job = self.manager.get(self.job_id)
+        job["state"] = "processing"
+        self.manager._write(job)
+        samples = [LightSample(i * 0.2, 900, 0, 0, 0, 0, 0, 0) for i in range(30)]
+        with patch("bout_splitter.review_app.duration_seconds", return_value=10), \
+             patch("bout_splitter.review_app.sample_video_lights", return_value=samples):
+            self.manager._generate(self.job_id)
+        failed = self.manager.get(self.job_id)
+        self.assertEqual(failed["state"], "error")
+        self.assertIn("Colored graphics", failed["error"])
 
 
 class UploadClientTests(unittest.TestCase):
